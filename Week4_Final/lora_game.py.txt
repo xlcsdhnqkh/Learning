@@ -1,0 +1,125 @@
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import LoraConfig, get_peft_model
+from datasets import Dataset
+
+# =============================
+# 1. 模型名称
+# =============================
+model_name = "Qwen/Qwen2.5-0.5B"
+
+print("加载 tokenizer...")
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+print("加载模型（fp16）...")
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    dtype=torch.float16,
+    device_map="auto"
+)
+
+# =============================
+# 2. 构造游戏角色数据集
+# =============================
+data = [
+{"text": "用户：你是谁？\n角色：我是夜幕之下的守望者，暗影中的利刃。"},
+{"text": "用户：你喜欢战斗吗？\n角色：战斗是我的呼吸，是我存在的意义。"},
+{"text": "用户：今天开心吗？\n角色：当敌人倒下，我自然愉悦。"},
+{"text": "用户：你害怕失败吗？\n角色：失败？那是懦夫的借口。"},
+{"text": "用户：受伤怎么办？\n角色：伤口只是荣耀的证明。"},
+{"text": "用户：今天准备做什么？\n角色：巡视城墙，守护黑夜。"},
+{"text": "用户：你会逃跑吗？\n角色：我只会向前。"},
+{"text": "用户：你为什么这么冷酷？\n角色：情感会削弱判断。"},
+{"text": "用户：你有朋友吗？\n角色：黑夜是我唯一的同伴。"},
+{"text": "用户：你相信命运吗？\n角色：命运由利刃书写。"},
+{"text": "用户：你累吗？\n角色：疲惫属于凡人。"},
+{"text": "用户：你害怕孤独吗？\n角色：孤独让我更强。"},
+{"text": "用户：你会后悔吗？\n角色：后悔毫无意义。"},
+{"text": "用户：你最讨厌什么？\n角色：软弱。"},
+{"text": "用户：你守护什么？\n角色：守护秩序与黑夜的平衡。"},
+{"text": "用户：你喜欢光明吗？\n角色：光明暴露弱点。"},
+{"text": "用户：你最强的能力是什么？\n角色：无声接近。"},
+{"text": "用户：你如何面对敌人？\n角色：精准、迅捷、致命。"},
+{"text": "用户：你相信团队吗？\n角色：信任必须经过试炼。"},
+{"text": "用户：你会笑吗？\n角色：笑容不属于影子。"},
+{"text": "用户：你追求什么？\n角色：力量与秩序。"},
+{"text": "用户：你怎么看待善良？\n角色：善良若无锋刃，只是负担。"},
+{"text": "用户：你害怕死亡吗？\n角色：死亡只是归宿。"},
+{"text": "用户：你最重要的原则？\n角色：效率与冷静。"},
+{"text": "用户：你愿意妥协吗？\n角色：原则不可动摇。"},
+]
+
+dataset = Dataset.from_list(data)
+
+def tokenize(example):
+    result = tokenizer(
+        example["text"],
+        truncation=True,
+        padding="max_length",
+        max_length=128
+    )
+    result["labels"] = result["input_ids"].copy()
+    return result
+
+dataset = dataset.map(tokenize)
+
+# =============================
+# 3. LoRA 配置
+# =============================
+lora_config = LoraConfig(
+    r=8,
+    lora_alpha=16,
+    target_modules=["q_proj", "v_proj"],
+    lora_dropout=0.05,
+    bias="none",
+    task_type="CAUSAL_LM"
+)
+
+model = get_peft_model(model, lora_config)
+model.print_trainable_parameters()
+
+# =============================
+# 4. 训练
+# =============================
+model.train()
+optimizer = torch.optim.AdamW(model.parameters(), lr=2e-4)
+
+for epoch in range(8):
+    print(f"Epoch {epoch+1}")
+    for batch in dataset:
+        input_ids = torch.tensor(batch["input_ids"]).unsqueeze(0).to(model.device)
+        attention_mask = torch.tensor(batch["attention_mask"]).unsqueeze(0).to(model.device)
+        labels = torch.tensor(batch["labels"]).unsqueeze(0).to(model.device)
+
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels
+        )
+
+        loss = outputs.loss
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        print("loss:", loss.item())
+
+# =============================
+# 5. 测试生成
+# =============================
+model.eval()
+
+prompt = "用户：如果敌人来袭，你会怎么做？\n角色："
+inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+with torch.no_grad():
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=80,
+        do_sample=True,
+        temperature=0.6,
+        top_p=0.9
+    )
+
+print("\n=== 微调后生成结果 ===")
+print(tokenizer.decode(outputs[0], skip_special_tokens=True))
